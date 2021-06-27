@@ -1,36 +1,49 @@
 from datetime import datetime as dt
 import urllib.request
-import csv, time, json
+import csv, time, os, sys, io
 from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options as WebDriverOptions
 from selenium.webdriver.support.select import Select
-import os
 from google.cloud import vision
-import io
-import sys
+import threading
+
+
+
+def split(q):
+    print("Split in ", q)
+    with open('placas.txt', mode='r', encoding='utf-8') as file:
+            data_base = [i.strip() for i in file.readlines()]
+            records = len(data_base)
+            block = records//q
+    for n in range(q):
+        with open('placas' + str(n) + '.txt', mode='w', encoding='utf-8') as file:
+            data_pendiente = [f'{i}\n' for i in data_base[block*n:block*(n+1)]]
+            file.writelines(data_pendiente)
 
 
 def consolidate():
     print('Consolidando bases de datos...')
-    with open('placas.txt', mode='r', encoding='utf-8') as file:
-        data_base = [i.strip() for i in file.readlines()]
-    with open('resultados.txt', mode='r', encoding='utf-8') as file:
-        reader = csv.reader(file, delimiter='|')
-        data_resultados = [i[0] for i in reader]
-        r = len(data_resultados)
-    with open('placas.txt', mode='w', encoding='utf-8') as file:
-        data_pendiente = [f'{i}\n' for i in data_base if i not in data_resultados]
-        file.writelines(data_pendiente)
-        s = len(data_pendiente)
-    print(f'Completas: {r} / Totales: {s}  =  {r/s*100:.2f}%')
+    for i in range(10):
+        j=str(i)
+        print('File: ',i)
+        with open('placas'+j+'.txt', mode='r', encoding='utf-8') as file:
+            data_base = [i.strip() for i in file.readlines()]
+        with open('resultados'+j+'.txt', mode='r', encoding='utf-8') as file:
+            reader = csv.reader(file, delimiter='|')
+            data_resultados = [i[0] for i in reader]
+            r = len(data_resultados)
+        with open('placas'+j+'.txt', mode='w', encoding='utf-8') as file:
+            data_pendiente = [f'{i}\n' for i in data_base if i not in data_resultados]
+            file.writelines(data_pendiente)
+            s = len(data_pendiente)
+        print(f'Completas: {r} / Totales: {s}  =  {r/s*100:.2f}%')
 
 
-def list_of_pending_placas():
-    with open('placas'+str(session)+'.txt', mode='r', encoding='utf-8') as file:
+def list_of_pending_placas(ses):
+    with open('placas'+ses+'.txt', mode='r', encoding='utf-8') as file:
         p = [i.strip() for i in file.readlines()]
         return p
-
 
 
 def driver_options():
@@ -46,7 +59,7 @@ def driver_options():
     return options
 
 
-def extract(placa, url):
+def extract(placa, url, ses):
     driver = webdriver.Chrome('/usr/bin/chromedriver', options = driver_options())
     while True:  # Loop infinito hasta salir con placa consultada
         captcha = ""
@@ -54,10 +67,10 @@ def extract(placa, url):
             # Activar página web
             driver.get(url)
             # Obtener y grabar imagen del captcha
-            urllib.request.urlretrieve(driver.find_element_by_xpath('//img').get_attribute('src'), 'captcha'+str(session)+'.jpg')
+            urllib.request.urlretrieve(driver.find_element_by_xpath('//img').get_attribute('src'), 'captcha'+ses+'.jpg')
             # Leer imagen de captcha grabado en disco
             #captcha = ocr2('captcha.jpg', api_key=ocr_key)
-            captcha = ocr3('captcha'+str(session)+'.jpg')
+            captcha = ocr3('captcha'+ses+'.jpg')
             #if miss_counter == 10:
             #    raise Exception # force an error to switch to the next OCR key
             #else:
@@ -69,7 +82,7 @@ def extract(placa, url):
         respuestas = [i.text for i in driver.find_elements_by_class_name('gridItemGroup')]  # Recoge resultados
         if respuestas:      # Datos completos
             print("Resultado: OK")
-            save_captcha(captcha)
+            os.system('cp captcha'+ses+'.jpg ' +  os.path.join("images",captcha+".jpg"))
             driver.quit()
             return respuestas
         elif "no es correcto" in driver.find_element_by_id('lblAlertaMensaje').text:  # Error en captcha ingresado
@@ -78,15 +91,6 @@ def extract(placa, url):
             print("Resultado: NO HAY INFORMACIÓN DE PLACA")
             driver.quit()
             return None
-
-def save_captcha(captcha):
-    n = 0
-    while True:
-        if os.path.exists(os.path.join("images",captcha+".jpg")):
-            n += 1
-        else:
-            os.system('cp captcha.jpg ' +  os.path.join("images",captcha+'_'+str(n)+".jpg"))
-            return
 
 
 def ocr3(image_path):
@@ -127,25 +131,42 @@ def add_to_file(filename, result):
         writer.writerow(result)
 
 
-def main():
+def main_loop():
+    this_thread = int(thread)
+    print(f'*** Starting Thread {this_thread} ***')
     url = 'https://portal.mtc.gob.pe/reportedgtt/form/frmconsultaplacaitv.aspx'
-    for k, placa in enumerate(list_of_pending_placas()):
-        print(f'({session}){k} Placa:{placa}|', end='')
+    for k, placa in enumerate(list_of_pending_placas(str(this_thread))):
+        if k == 5:
+            print(f'End session {this_thread}')
+            return
+        print(f'({this_thread}){k} Placa:{placa}|', end='')
         try:
-            scrape = extract(placa, url)
+            scrape = extract(placa, url, str(this_thread))
             resultado = analizar_respuesta(placa, scrape)
-            add_to_file('resultados'+str(session)+'.txt', resultado)
+            add_to_file('resultados'+str(this_thread)+'.txt', resultado)
         except KeyboardInterrupt:
             quit()
         except:
             pass
 
 
-
-try:
-    session = sys.argv[1] 
-except:
+# Start Program
+if len(sys.argv) == 1:
     consolidate()
-    quit()
+else:
+    session = int(sys.argv[1])
+    for thread in range(session):
+        new_thread = threading.Thread(target=main_loop)
+        new_thread.start()
 
-main()
+
+'''
+or k, fintech in enumerate(active.fintechs):
+			if fintech['online']: # and fintech['id'] == 10:
+				new_thread = threading.Thread(target=get_source, args=(fintech, options, k))
+				all_threads.append(new_thread)
+				try:
+					new_thread.start()
+				except:
+					pass
+'''
