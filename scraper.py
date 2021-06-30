@@ -10,14 +10,17 @@ import threading
 from tqdm import tqdm
 from PIL import Image
 import hashlib
+import gpyocr
 
 
 class Basics:
     def __init__(self, ses):
         self.monitor = [0 for _ in range(ses)]
-        self.captcha_table_data, self.captcha_table_keys = self.load_captcha_hashes()
+        #self.captcha_table_data, self.captcha_table_keys = self.load_captcha_hashes()
         self.webdriver_options = self.load_webdriver_options()
         self.url = 'https://portal.mtc.gob.pe/reportedgtt/form/frmconsultaplacaitv.aspx'
+        self.exceptions = 0
+        self.next_pending_image = len(os.listdir('/home/gabriel/pythonCode/RevTec/pending_images/')) + 1
 
     def load_captcha_hashes(self):
         with open('/home/gabriel/pythonCode/RevTec/captcha_hashes.txt', mode='r', encoding='utf-8') as hash_file:
@@ -29,7 +32,7 @@ class Basics:
         options = WebDriverOptions()
         options.add_argument("--window-size=800,800")
         options.add_argument("--headless")
-        options.add_argument("--disable-gpu")
+        #options.add_argument("--disable-gpu")
         options.add_argument("--silent")
         options.add_argument("--disable-notifications")
         options.add_argument("--incognito")
@@ -78,6 +81,7 @@ def extract(placa, url, ses):
         while not captcha:
             driver.get(url)
             urllib.request.urlretrieve(driver.find_element_by_xpath('//img').get_attribute('src'), 'captcha'+ses+'.jpg')
+            
             # See if hash in database to avoid using OCR
             #captcha_hash = hashlib.md5(Image.open('captcha'+ses+'.jpg').tobytes())
             #captcha_hash = captcha_hash.hexdigest()
@@ -85,22 +89,28 @@ def extract(placa, url, ses):
             #    captcha = captcha_table_data[captcha_hash]
             #    print('*** Woohoo ***')
             #else:  # If hash not in database, go with OCR
-            captcha = ocr3('captcha'+ses+'.jpg')
+            captcha = ocr4('captcha'+ses+'.jpg')
+            if not captcha:
+                # Copy captcha into directory to be processed some other time
+                os.system('cp captcha'+ses+'.jpg ' + os.path.join('pending_images',f'pend{run.next_pending_image:06}.jpg'))
+                run.next_pending_image += 1
+
+                
         driver.find_element_by_id('txtPlaca').send_keys(placa)      # Llenar campo "Nro de placa"
         driver.find_element_by_id('txtCaptcha').send_keys(captcha)  # Llenar campo de Captcha
         driver.find_element_by_id('BtnBuscar').click()              # Click Botón Buscar
         time.sleep(0.5)
         respuestas = [i.text for i in driver.find_elements_by_class_name('gridItemGroup')]  # Recoge resultados
         if respuestas:      # Datos completos
-            #print("Resultado: OK")
+            # Save captcha correctly identified
             os.system('cp --backup=numbered captcha'+ses+'.jpg ' +  os.path.join("images",captcha+".jpg"))
             driver.quit()
             return respuestas
         elif "no es correcto" in driver.find_element_by_id('lblAlertaMensaje').text:  # Error en captcha ingresado
-            #print("CAPTCHA INCORRECTO | ",end="", flush = True) # Reinicia loop
             pass
         else: # No se obtuvo datos de la placa
-            #print("Resultado: NO HAY INFORMACIÓN DE PLACA")
+            # Save captcha correctly identified
+            os.system('cp --backup=numbered captcha'+ses+'.jpg ' +  os.path.join("images",captcha+".jpg"))
             driver.quit()
             return None
 
@@ -114,6 +124,17 @@ def valid_placa(placa):
         return False
     return True
     
+
+def ocr4(image_path):
+    try:
+        r = gpyocr.tesseract_ocr(image_path, psm=7)[0].strip()
+        captcha_guessed = ''.join([i for i in r if i.isdigit()])
+        if len(captcha_guessed) == 6:
+            return captcha_guessed
+        else:
+            return ''
+    except:
+        return ''
 
 def ocr3(image_path):
     client = vision.ImageAnnotatorClient.from_service_account_json('google-vision-keys.json')
@@ -154,14 +175,14 @@ def add_to_file(filename, result):
 
 
 def thread_monitor(ses, iterations):
+    print(f'{" Progress ":-^{ses*8+1}}')
     while True:
-        #monitor = [f'{i/(iterations+1)*100:.1f}%' for i in run.monitor]
         monitor = [i/(iterations+1) for i in run.monitor]
         p = ''
         for mon in monitor:
-            p += '| ' + f'{mon*100:.2f}%' + ' '
+            p += '| ' + f'{mon:05.1%}' + ' '
+        p += '| Running: ' + str(sum(run.monitor)-ses+1)
         print(p, end='\r', flush=True)
-        #status = [True if i == 1 else False for i in monitor]
         if monitor.count(1) == ses:
             print('\n')
             return
@@ -182,7 +203,8 @@ def dashboard(start, opt=True):
     if opt:
         records = int(sys.argv[1]) * int(sys.argv[2])
         time_taken = dt.now() - start
-        print(f'Process Rate: {records:,} records in {time_taken} = {records/time_taken.total_seconds():.1f} records/second')
+        print(f'Total Exceptions: {run.exceptions:,} = {run.exceptions/records:.2%}')
+        print(f'Process Rate: {records:,} records in {time_taken} = {records/time_taken.total_seconds():.2f} records/second')
     print('*'*10, 'End Stats', '*'*10)
 
 
@@ -227,6 +249,7 @@ def main_loop():
         except KeyboardInterrupt:
             quit()
         except:
+            run.exceptions += 1
             print(f'Exception Thread: {this_thread}')
 
 
@@ -235,38 +258,46 @@ def main_loop():
 
 if __name__ == '__main__':
 
-    start_time = dt.now()
-
     # Init variables
-    IMAGE_FOLDER = '/home/gabriel/pythonCode/RevTec/images' 
-
-    # Print current state    
-    dashboard(0, opt=False)
-
-    if len(sys.argv) < 3:
-        raise Exception('Need two arguments')
-
+    IMAGE_FOLDER = '/home/gabriel/pythonCode/RevTec/images'
+    start_time = dt.now()
     sessions = int(sys.argv[1])
     iterations = int(sys.argv[2])
     run = Basics(sessions)
 
-    # Take main input file with placas and split into files with max_placas each
-    split(sessions)
+    # Checks for file that indicates completed previous run
+    if os.path.exists('/home/gabriel/pythonCode/RevTec/completed.sig'):
 
-    # Create threads to extract in parallel
-    all_threads = []
-    for thread in range(sessions):
-        new_thread = threading.Thread(target=main_loop)
-        all_threads.append(new_thread)
-        new_thread.start()
+        # Remove file that indicates process complete
+        os.remove('/home/gabriel/pythonCode/RevTec/completed.sig')
+    
+        # Print current state    
+        dashboard(0, opt=False)
 
-    # Ensure all threads end before moving forward
-    thread_monitor(sessions, iterations)
-    #_ = [i.join() for i in all_threads]
-   
-    # Join all split result files into big one
-    print('Consolidando bases de datos')
-    os.system('cat resultados*.txt >> todo_resultados.txt')
+        if len(sys.argv) < 3:
+            raise Exception('Need two arguments')
+
+        # Take main input file with placas and split into files with max_placas each
+        split(sessions)
+
+        # Create threads to extract in parallel
+        all_threads = []
+        for thread in range(sessions):
+            new_thread = threading.Thread(target=main_loop)
+            all_threads.append(new_thread)
+            new_thread.start()
+
+        # Ensure all threads end before moving forward
+        thread_monitor(sessions, iterations)
+        #_ = [i.join() for i in all_threads]
+        
+        # Join all split result files into big one
+        print('Consolidando bases de datos')
+        os.system('cat resultados*.txt >> todo_resultados.txt')
+
+    else:
+        print('Completing previous run')
+        sessions = len([i for i in os.listdir('/home/gabriel/pythonCode/RevTec/') if 'resultados' in i]) - 1
 
     # Clean placas split files by removing processed placas
     consolidate(sessions)
@@ -297,3 +328,7 @@ if __name__ == '__main__':
 
     # Close with stats
     dashboard(start_time)
+
+    # Normal exit... write file that marks as completed
+    with open('/home/gabriel/pythonCode/RevTec/completed.sig', 'w') as file:
+        file.write(' ')
