@@ -1,4 +1,12 @@
 images/
+pending_images/
+temp/
+__pycache__/
+backup/
 *.txt
 *.jpg
-
+*.json
+*.sig
+sortedImages/
+unsortedImages/
+virtualenv/
