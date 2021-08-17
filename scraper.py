@@ -1,32 +1,31 @@
-from datetime import datetime as dt
+from datetime import timedelta, datetime as dt
 import urllib.request
-import csv, time, os, sys, io
+import csv, time, os, sys
 from selenium import webdriver
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options as WebDriverOptions
-from selenium.webdriver.support.select import Select
 import threading
-from tqdm import tqdm
 import easyocr
+import warnings
+from tqdm import tqdm
 
 
 class Basics:
-    def __init__(self, ses):
+    def __init__(self):
+        # Volume arguments
+        self.sessions = int(sys.argv[1])
+        self.iterations = int(sys.argv[2])
+        self.cycles = int(sys.argv[3])
         # Web scraping information
         self.url = 'https://portal.mtc.gob.pe/reportedgtt/form/frmconsultaplacaitv.aspx'
         self.webdriver_options = self.load_webdriver_options()
         # Define paths
         self.base_dir = '/home/gabriel/pythonCode/RevTec/'
         self.temp_dir = os.path.join(self.base_dir, 'temp')
-        self.sorted_images_dir = os.path.join(self.base_dir, 'sortedImages')
-        self.unsorted_images_dir = os.path.join(self.base_dir, 'unsortedImages')   #unsortedImages
         # Define blank counters
-        self.monitor = [0 for _ in range(ses)]
-        self.exceptions = 0
-        self.results = [[] for _ in range(ses)]
-        self.done = [False for _ in range(ses)]
+        self.reset_counters()
 
     def load_webdriver_options(self):
+        '''Define options for Chromedriver'''
         options = WebDriverOptions()
         options.add_argument("--window-size=800,800")
         options.add_argument("--headless")
@@ -37,7 +36,16 @@ class Basics:
         options.add_experimental_option('excludeSwitches', ['enable-logging'])
         return options
 
+    def reset_counters(self):
+        '''Restart all counters'''
+        self.monitor = [0 for _ in range(self.sessions)]
+        self.exceptions = 0
+        self.results = [[] for _ in range(self.sessions)]
+        self.done = [False for _ in range(self.sessions)]
+
+
 def split(ses, iters):
+    '''Breaks up main placas text file into the amount of files and records specified in the arguments'''
     with open(os.path.join(RUN.base_dir, 'todo_placas.txt'), mode='r', encoding='utf-8') as file:
             data_base = [i.strip() for i in file.readlines()]
             block = len(data_base)//ses
@@ -46,8 +54,10 @@ def split(ses, iters):
             data_pendiente = [f'{i}\n' for i in data_base[block*n:block*(n+1)]]
             file.writelines(data_pendiente[:iters])
 
-def consolidate():
-    resultados= []
+def consolidate_partials():
+    '''Join all split result files into big one'''
+    print('\nConsolidando bases de datos')
+    resultados = []
     # Integrate all partial results into main file
     with open(os.path.join(RUN.base_dir,'todo_resultados.txt'), mode='a', encoding='utf-8') as file:
         for result in RUN.results:
@@ -55,18 +65,19 @@ def consolidate():
                 writer = csv.writer(file, delimiter="|")
                 writer.writerow(item)
                 resultados.append(item[0])
-    # Cross-reference placas and resultados files and only keep placas with no results
     with open(os.path.join(RUN.base_dir, 'todo_placas.txt'), mode='r', encoding='utf-8') as file:
         placas = [i.strip() for i in file.readlines()]
-        placas_left = [f'{i}\n' for i in tqdm(placas, desc='Purging Placas database') if i not in resultados]
+        placas_left = [f'{i}\n' for i in tqdm(placas) if i not in resultados]
     with open(os.path.join(RUN.base_dir, 'todo_placas.txt'), mode='w', encoding='utf-8') as file:
         file.writelines(placas_left)
 
 def list_of_pending_placas(ses):
+    '''Create list with all placas in session file'''
     with open(os.path.join(RUN.temp_dir,'placas'+ses+'.txt'), mode='r', encoding='utf-8') as file:
         return [i.strip() for i in file.readlines()]
 
 def extract(placa, url, ses):
+    '''Open webpage, get captcha, solve it and retrieve placa information'''
     driver = webdriver.Chrome('/usr/bin/chromedriver', options = RUN.webdriver_options)
     while True:  # Loop infinito hasta salir con placa consultada
         captcha = ""
@@ -93,6 +104,7 @@ def extract(placa, url, ses):
             return None
 
 def valid_captcha(captcha):
+    '''Validate that captcha obtained after OCR makes sense'''
     if len(captcha) != 6:
         return False
     elif not captcha.isdigit():
@@ -100,6 +112,7 @@ def valid_captcha(captcha):
     return True
 
 def valid_placa(placa):
+    '''Validate that placa from list makes sense (should, because file was cleaned, but just in case)'''
     if len(placa) != 6:
         return False
     if placa[0].isdigit():
@@ -109,13 +122,15 @@ def valid_placa(placa):
     return True
 
 def ocr(image_path):
-    result = reader.readtext(image_path)
+    '''Use offline EasyOCR to convert captcha image to text'''
+    result = READER.readtext(image_path)
     if len(result) > 0 and len(result[0]) > 0:
         return result[0][1]
     else:
         return ''
 
 def analizar_respuesta(placa,respuesta):
+    '''Parse the webpage response after getting placa information'''
     fecha_hoy = dt.strftime(dt.now(),"%m/%d/%Y")
     if not respuesta:
         return [placa]+[""]*8+[fecha_hoy]
@@ -137,48 +152,34 @@ def analizar_respuesta(placa,respuesta):
     return [placa,empresa,cert,fecha_inspec,fecha_finvig,aprobacion,estado_vigencia,ambito,tipo,fecha_hoy]
 
 def add_to_file(filename, result):
+    '''Write new record to split text file'''
     with open(filename, mode='a', encoding='utf-8') as file:
         writer = csv.writer(file, delimiter="|")
         writer.writerow(result)
 
 def thread_monitor(ses, iterations):
-    print(f'{" Progress ":-^{ses*8+1}}')
+    '''Shows progress for each thread and controls that all finish before moving on'''
+    print(f'{" Progreso ":-^{ses*8+1}}')
     while True:
         monitor = [i/iterations for i in RUN.monitor]
         p = ''
         for mon in monitor:
             p += '| ' + f'{mon:05.1%}' + ' '
-        p += '| Running: ' + str(sum(RUN.monitor))
+        p += '| Total: ' + str(sum(RUN.monitor))
         print(p, end='\r', flush=True)
         if all(RUN.done):
-            print('\n')
             return
         time.sleep(2)
 
-def dashboard(start, exit=True):
-    # Count records for done and pending
-    with open('todo_placas.txt', mode='r') as file:
-        placas = len([i for i in file.readlines()])
-    with open('todo_resultados.txt', mode='r') as file:
-        resultados = len([i for i in file.readlines()])
-    # Basic data
-    print('*'*10, 'Stats', '*'*10)
-    print(f'Total Results: {resultados:,} ({resultados/placas*100:.2f}%)\nPlacas Pending: {placas:,}')
-    if exit:
-        records = int(sys.argv[1]) * int(sys.argv[2])
-        time_taken = dt.now() - start
-        print(f'Total Exceptions: {RUN.exceptions:,} = {RUN.exceptions/records:.2%}')
-        print(f'Process Rate: {records*(repeat+1):,} records in {time_taken} = {records*(repeat+1)/time_taken.total_seconds():.2f} records/second')
-    print('*'*10, 'End Stats', '*'*10)
-
 def cleaner():
-    # Erase all content from 'temp' folder
+    '''Erase all content from "temp" folder'''
     for file in os.listdir(RUN.temp_dir):
         os.remove(os.path.join(RUN.temp_dir, file))
 
-def main_loop():
+def main_loop(thread):
+    '''Manages the placas loop for each thread'''
     this_thread = int(thread)
-    for k, placa in enumerate(list_of_pending_placas(str(this_thread))):
+    for placa in list_of_pending_placas(str(this_thread)):
         if valid_placa(placa):
             RUN.monitor[this_thread] += 1
             try:
@@ -191,43 +192,47 @@ def main_loop():
                 RUN.exceptions += 1
     RUN.done[this_thread] = True
 
-
-# Start Program
-if __name__ == '__main__':
-    # Validate arguments for Threads (sessions), Iterations and Cycles
-    if len(sys.argv) < 3:
-        raise Exception('Need at least three arguments. Format: scraper.py #THREADS #SEARCHES per thread #CYCLES')
-    # Init variables
-    start_time = dt.now()
-    sessions = int(sys.argv[1])
-    iterations = int(sys.argv[2])
-    reader = easyocr.Reader(['en'], gpu=False)
+def main():
+    fin_proceso = dt.now()+timedelta(seconds=RUN.sessions*RUN.iterations*RUN.cycles/1.6)
+    print(f'Tiempo estimado = {(RUN.sessions*RUN.iterations*RUN.cycles/1.6/3600):.2f} horas. ({fin_proceso})')
     # Start cycling
     for repeat in range(int(sys.argv[3])):
-        print(f'Cycle: {repeat+1} of {sys.argv[3]}')
-        RUN = Basics(sessions)
-        # Print current state    
-        dashboard(0, exit=False)
+        RUN.reset_counters()
+        print(f'\nCiclo: {repeat+1} de {sys.argv[3]} ({(repeat+1)/int(sys.argv[3]):.1%})')
         # Take main input file with placas and split into files with max_placas each
-        split(sessions, iterations)
+        split(RUN.sessions, RUN.iterations)
         # Create threads to extract in parallel
         all_threads = []
-        for thread in range(sessions):
-            new_thread = threading.Thread(target=main_loop)
+        for thread in range(RUN.sessions):
+            new_thread = threading.Thread(target=main_loop, args=(thread,))
             all_threads.append(new_thread)
             new_thread.start()
         # Gives control to monitor and ensures all threads end before moving forward
-        thread_monitor(sessions, iterations)
-        # Join all split result files into big one
-        print('\nConsolidando bases de datos')
+        thread_monitor(RUN.sessions, RUN.iterations)
         # Take results and integrate them into existing results
-        consolidate()
+        consolidate_partials()
         # Clean temp files
         cleaner()
     # Backup main files in Google Drive
     if 'NOBACK' not in sys.argv:
-        print('Backing up in Google Drive')
+        print('Backup en Google Drive')
         os.system('rclone copy todo_resultados.txt gDrive:/TechData/RevTec')
         os.system('rclone copy todo_placas.txt gDrive:/TechData/RevTec')
-    # Close showing stats
-    dashboard(start_time)
+    # Close showing stats and total time
+    print(f'Velocidad: {RUN.sessions*RUN.iterations*RUN.cycles:,} registros en {dt.now()-start_time} = {(RUN.sessions*RUN.iterations*RUN.cycles)/(dt.now()-start_time).total_seconds():.2f} registros/segundo.')
+
+
+# Start Program
+if __name__ == '__main__':
+    # Init Timer
+    start_time = dt.now()   
+    # Init OCR
+    warnings.filterwarnings('ignore')
+    READER = easyocr.Reader(['en'], gpu=False)
+    # Validate arguments for Threads (sessions), Iterations and Cycles
+    if len(sys.argv) < 3:
+        raise Exception('Obligatorio tres argumentos. Formato: scraper.py #hilos #búsquedas por hilo #ciclos')
+    # Init Global variables
+    RUN = Basics()
+    # Start Program
+    main()
